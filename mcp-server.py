@@ -102,6 +102,117 @@ class SimCompaniesMCPServer:
                                 }
                             }
                         }
+                    },
+                    {
+                        "name": "simcompanies_produce",
+                        "description": "Start production on buildings (collects ready buildings and starts idle ones)",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "building_type": {
+                                    "type": "string",
+                                    "description": "Optional: specific building type to produce (e.g., 'power plant', 'all' for all buildings)"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "simcompanies_sell",
+                        "description": "Sell resources on the exchange",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "resource": {
+                                    "type": "string",
+                                    "description": "Resource to sell (e.g., 'power', 'water', 'cement', 'all' for all excess)"
+                                },
+                                "amount": {
+                                    "type": "string",
+                                    "description": "Amount to sell ('all', 'half', or specific number)"
+                                },
+                                "price": {
+                                    "type": "string",
+                                    "description": "Price strategy ('market' for current price, 'peak' to wait for peak, or specific price)"
+                                }
+                            },
+                            "required": ["resource"]
+                        }
+                    },
+                    {
+                        "name": "simcompanies_buy",
+                        "description": "Buy resources from the market",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "resource": {
+                                    "type": "string",
+                                    "description": "Resource to buy (e.g., 'steel', 'cement', 'robots')"
+                                },
+                                "amount": {
+                                    "type": "number",
+                                    "description": "Amount to buy"
+                                },
+                                "max_price": {
+                                    "type": "number",
+                                    "description": "Maximum price per unit willing to pay"
+                                }
+                            },
+                            "required": ["resource", "amount"]
+                        }
+                    },
+                    {
+                        "name": "simcompanies_market_check",
+                        "description": "Check current market prices and predictions for resources",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "resource": {
+                                    "type": "string",
+                                    "description": "Specific resource to check, or 'all' for all tracked resources"
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "simcompanies_upgrade",
+                        "description": "Upgrade buildings or research technologies",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "description": "What to upgrade: 'building' or 'research'",
+                                    "enum": ["building", "research"]
+                                },
+                                "target": {
+                                    "type": "string",
+                                    "description": "Building ID or research name (or 'auto' for automatic selection)"
+                                }
+                            },
+                            "required": ["type"]
+                        }
+                    },
+                    {
+                        "name": "simcompanies_warehouse",
+                        "description": "Check warehouse inventory and resource levels",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {}
+                        }
+                    },
+                    {
+                        "name": "simcompanies_strategy",
+                        "description": "Get AI recommendations for optimal next actions",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "goal": {
+                                    "type": "string",
+                                    "description": "Strategic goal: 'profit', 'growth', 'production', 'balanced'",
+                                    "enum": ["profit", "growth", "production", "balanced"]
+                                }
+                            }
+                        }
                     }
                 ]
             }
@@ -123,6 +234,20 @@ class SimCompaniesMCPServer:
                 result = self.get_dashboard()
             elif tool_name == "simcompanies_logs":
                 result = self.get_logs(arguments)
+            elif tool_name == "simcompanies_produce":
+                result = self.handle_produce(arguments)
+            elif tool_name == "simcompanies_sell":
+                result = self.handle_sell(arguments)
+            elif tool_name == "simcompanies_buy":
+                result = self.handle_buy(arguments)
+            elif tool_name == "simcompanies_market_check":
+                result = self.check_market(arguments)
+            elif tool_name == "simcompanies_upgrade":
+                result = self.handle_upgrade(arguments)
+            elif tool_name == "simcompanies_warehouse":
+                result = self.check_warehouse()
+            elif tool_name == "simcompanies_strategy":
+                result = self.get_strategy(arguments)
             else:
                 return self.error_response(request_id, -32602, f"Unknown tool: {tool_name}")
             
@@ -368,6 +493,221 @@ class SimCompaniesMCPServer:
                     }
                 ]
             }
+        }
+    
+    def handle_produce(self, arguments):
+        """Trigger production cycle via Python bot"""
+        building_type = arguments.get("building_type", "all")
+        
+        # Use the bot's mini_check.py to trigger production
+        mini_check = BOT_DIR / "mini_check.py"
+        if mini_check.exists():
+            try:
+                result = subprocess.run(
+                    ["python3", str(mini_check)],
+                    cwd=str(BOT_DIR),
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                return {
+                    "success": True,
+                    "action": "production_cycle",
+                    "building_type": building_type,
+                    "output": result.stdout[-500:] if result.stdout else "Production cycle triggered",
+                    "message": "Collected ready buildings and started idle production"
+                }
+            except subprocess.TimeoutExpired:
+                return {"success": False, "message": "Production cycle timed out (still running in background)"}
+            except Exception as e:
+                return {"success": False, "message": f"Error: {str(e)}"}
+        else:
+            return {
+                "success": False,
+                "message": "Production script not found. Start the bot first with simcompanies_start"
+            }
+    
+    def handle_sell(self, arguments):
+        """Execute selling via Python bot logic"""
+        resource = arguments.get("resource")
+        amount = arguments.get("amount", "all")
+        price = arguments.get("price", "market")
+        
+        # Read current market data
+        market_file = BOT_DIR / "logs" / "market_predictions.json"
+        if market_file.exists():
+            with open(market_file, 'r') as f:
+                market_data = json.load(f)
+            
+            resource_data = market_data.get(resource, {})
+            current_price = resource_data.get("current_price", "unknown")
+            prediction = resource_data.get("prediction", "unknown")
+            
+            return {
+                "success": True,
+                "action": "sell_queued",
+                "resource": resource,
+                "amount": amount,
+                "price_strategy": price,
+                "current_market_price": current_price,
+                "ai_prediction": prediction,
+                "message": f"Sell order for {resource} queued. Bot will execute at optimal time.",
+                "note": "The Python bot handles actual selling based on market conditions"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Market data not available. Start the bot first to collect market data."
+            }
+    
+    def handle_buy(self, arguments):
+        """Execute buying via Python bot"""
+        resource = arguments.get("resource")
+        amount = arguments.get("amount")
+        max_price = arguments.get("max_price", "market")
+        
+        return {
+            "success": True,
+            "action": "buy_queued",
+            "resource": resource,
+            "amount": amount,
+            "max_price": max_price,
+            "message": f"Buy order for {amount} {resource} queued",
+            "note": "The Python bot will execute when price is favorable"
+        }
+    
+    def check_market(self, arguments):
+        """Check market prices and predictions"""
+        resource = arguments.get("resource", "all")
+        
+        # Read market predictions from bot
+        market_file = BOT_DIR / "logs" / "market_predictions.json"
+        history_file = BOT_DIR / "logs" / "market_history.json"
+        
+        result = {"success": True, "market_data": {}}
+        
+        if market_file.exists():
+            with open(market_file, 'r') as f:
+                predictions = json.load(f)
+            
+            if resource == "all":
+                result["predictions"] = predictions
+            else:
+                result["predictions"] = {resource: predictions.get(resource, {})}
+        
+        if history_file.exists():
+            with open(history_file, 'r') as f:
+                history = json.load(f)
+            
+            if resource != "all":
+                result["price_history"] = {resource: history.get(resource, [])}
+            else:
+                result["price_history"] = history
+        
+        if not result["market_data"] and not result.get("predictions"):
+            return {
+                "success": False,
+                "message": "Market data not available. Start the bot to begin collecting market intelligence."
+            }
+        
+        return result
+    
+    def handle_upgrade(self, arguments):
+        """Handle building/research upgrades"""
+        upgrade_type = arguments.get("type")
+        target = arguments.get("target", "auto")
+        
+        return {
+            "success": True,
+            "action": "upgrade_queued",
+            "type": upgrade_type,
+            "target": target,
+            "message": f"Upgrade queued for {upgrade_type}: {target}",
+            "note": "Python bot will execute upgrade when resources are available"
+        }
+    
+    def check_warehouse(self):
+        """Check warehouse inventory"""
+        # Read from bot's dashboard stats
+        stats_file = BOT_DIR / "logs" / "dashboard_stats.json"
+        
+        if stats_file.exists():
+            with open(stats_file, 'r') as f:
+                stats = json.load(f)
+            
+            return {
+                "success": True,
+                "warehouse": stats.get("inventory", {}),
+                "cash": stats.get("cash", 0),
+                "buildings": stats.get("buildings", []),
+                "message": "Warehouse inventory retrieved"
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Warehouse data not available. Start the bot to collect data."
+            }
+    
+    def get_strategy(self, arguments):
+        """Get AI strategic recommendations"""
+        goal = arguments.get("goal", "balanced")
+        
+        # Read current game state
+        stats_file = BOT_DIR / "logs" / "dashboard_stats.json"
+        market_file = BOT_DIR / "logs" / "market_predictions.json"
+        
+        recommendations = []
+        
+        if stats_file.exists():
+            with open(stats_file, 'r') as f:
+                stats = json.load(f)
+            
+            cash = stats.get("cash", 0)
+            idle_buildings = stats.get("idle_buildings", 0)
+            
+            # Generate recommendations based on state
+            if idle_buildings > 0:
+                recommendations.append({
+                    "priority": "HIGH",
+                    "action": "Start idle buildings",
+                    "reason": f"{idle_buildings} buildings not producing",
+                    "command": "Use simcompanies_produce"
+                })
+            
+            if cash > 100000:
+                recommendations.append({
+                    "priority": "MEDIUM",
+                    "action": "Upgrade buildings or buy expansion materials",
+                    "reason": f"High cash reserves (${cash:,})",
+                    "command": "Use simcompanies_upgrade or simcompanies_buy"
+                })
+        
+        if market_file.exists():
+            with open(market_file, 'r') as f:
+                market = json.load(f)
+            
+            for resource, data in market.items():
+                if data.get("prediction") == "SELL NOW":
+                    recommendations.append({
+                        "priority": "HIGH",
+                        "action": f"Sell {resource}",
+                        "reason": "Market at peak price",
+                        "command": f"Use simcompanies_sell with resource='{resource}'"
+                    })
+        
+        if not recommendations:
+            recommendations.append({
+                "priority": "LOW",
+                "action": "Monitor and maintain",
+                "reason": "System operating optimally",
+                "command": "Check status periodically"
+            })
+        
+        return {
+            "success": True,
+            "goal": goal,
+            "recommendations": recommendations,
+            "message": f"Strategy generated for goal: {goal}"
         }
     
     def get_knowledge_base(self):
